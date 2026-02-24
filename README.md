@@ -34,8 +34,13 @@ go build -o bin/sol2neo ./cmd/sol2neo
 |----------|--------|
 | Baseline corpus | ✅ 10/10 contracts pass |
 | Complex examples | ✅ 9/9 contracts pass |
-| Semantic tests | ✅ 3/4 contracts pass |
+| External semantic | ✅ 5/5 contracts pass |
+| Solidity semantic smoke | ✅ 4/4 contracts pass |
+| Full suite | ✅ 28/28 contracts pass |
 | Build | ✅ `go build ./...` passes |
+| Tests | ✅ `go test ./...` passes |
+
+Validated on **February 24, 2026** via `testcontracts/run_full_suite.sh`.
 
 **Tested contracts:** `FlashLoan`, `Lottery`, `PiggyBank`, `SimpleAMM`, `SimpleDAO`, `SimpleStorage`, `Staking`, `StandaloneERC20`, `TimeLock`, `TodoList`, `Ballot`, `BlindAuction`, `Purchase`, `SimpleAuction`, and more.
 
@@ -119,11 +124,13 @@ neo-go contract compile \
 | Events | `runtime.Notify()` | ✅ |
 | Constructors | `_deploy()` | ✅ |
 | `require()` / `revert()` | `panic()` | ✅ |
-| `block.timestamp/number` | `runtime.GetTime()` / `ledger.CurrentIndex()` | ✅ |
+| `block.timestamp/number/chainid` | `runtime.GetTime()` / `ledger.CurrentIndex()` / `runtime.GetNetwork()` | ✅ |
 | `msg.sender` | `runtime.GetCallingScriptHash()` | ✅ |
 | `this` | `runtime.GetExecutingScriptHash()` | ✅ |
 | Power operator (`**`) | `pow()` helper | ✅ |
 | View/pure functions | Read-only storage context | ✅ |
+| `delete` on mapping slots | `storage.Delete()` | ✅ |
+| ERC721 receiver pattern | `contract.Call(...)` + selector bytes lowering | ✅ |
 
 ### Type Mappings
 
@@ -171,16 +178,16 @@ func getValue() int {
 
 ## Limitations
 
-| Not Supported | Reason |
-|---------------|--------|
-| `delegatecall` | No NeoVM equivalent |
-| `selfdestruct` | No Neo equivalent |
-| Inline assembly | No NeoVM assembly |
-| Function overloading | Go limitation |
-| Multiple inheritance | Complex to map |
-| `msg.sig` / `msg.data` | Different dispatch model |
-| `gasleft()` | Different gas model |
-| `ecrecover` | Not in current NeoGo interop |
+| Feature | Current status |
+|---------|----------------|
+| `delegatecall` / `staticcall` | Lowered to low-level call helpers with warnings. Does **not** preserve EVM delegate/static semantics. |
+| `selfdestruct` | Lowered to `management.Destroy()` with warning (beneficiary argument ignored). |
+| Inline assembly | Not supported. Emitted as unsupported statement with warning. |
+| Function overloading | Supported via deterministic mangled Go names (for example `foo__uint256`, `foo__address`) while preserving call-site resolution. |
+| Multiple inheritance | Not fully mapped. |
+| `msg.sig` / `msg.data` | Approximated from `Runtime.GetScriptContainer().Script` with warnings (not EVM calldata-equivalent). |
+| `gasleft()` | Supported via `runtime.GasLeft()`. |
+| `ecrecover` | Lowered to `crypto.RecoverSecp256K1` + `contract.CreateStandardAccount` with warning (Neo address semantics, not exact EVM address semantics). |
 
 ## Project Structure
 
@@ -206,9 +213,10 @@ sol2neo/
 
 ### Roadmap
 
-- [ ] `block.chainid` support for EIP-712
-- [ ] `ecrecover` compatibility path
-- [ ] ERC721 pattern improvements
+- [x] `block.chainid` support for EIP-712 (`runtime.GetNetwork()`)
+- [x] `ecrecover` compatibility path (Neo-address semantics)
+- [x] ERC721 receiver/delete lowering fixes
+- [ ] Delegate/static call semantic parity (currently approximation with warnings)
 - [ ] Comprehensive test coverage
 
 ## License

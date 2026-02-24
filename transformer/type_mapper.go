@@ -164,11 +164,11 @@ func MapBuiltin(funcName string) string {
 	case "ripemd160":
 		return "crypto.Ripemd160"
 	case "ecrecover":
-		return "crypto.Ecrecover"
+		return "__ecrecover"
 
 	// Address functions
 	case "address":
-		return "interop.NewHash160" // Would need proper implementation
+		return "interop.Hash160"
 
 	// Type conversion functions
 	case "uint", "uint8", "uint16", "uint32", "uint64", "uint256":
@@ -184,15 +184,15 @@ func MapBuiltin(funcName string) string {
 
 	// ABI encoding functions
 	case "abi.encode":
-		return "interop.ABIEncode"
+		return "std.Serialize"
 	case "abi.decode":
-		return "interop.ABIDecode"
+		return "std.Deserialize"
 
 	// Gas and call functions
 	case "gasleft":
 		return "runtime.GasLeft"
 	case "blockhash":
-		return "ledger.GetBlockHash"
+		return "__blockHash"
 
 	// Other builtins
 	case "require":
@@ -201,6 +201,8 @@ func MapBuiltin(funcName string) string {
 		return "assertImpl"
 	case "revert":
 		return "revertImpl"
+	case "selfdestruct":
+		return "management.Destroy"
 
 	default:
 		return funcName

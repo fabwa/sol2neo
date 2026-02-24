@@ -14,6 +14,7 @@ var currentContractStructs []string
 var currentContractStorageArrays []string // Track state arrays that need storage-based access
 var currentContractEnumNames = make(map[string]bool)
 var currentContractFunctionNames = make(map[string]string)
+var currentContractFunctionNamesByID = make(map[int]string)
 var currentContractVariableTypes = make(map[string]string)
 var currentContractMappingValueTypes = make(map[string]string)
 var currentContractModifiers = make(map[string]parser.SolidityASTNode)
@@ -258,20 +259,35 @@ func transformContract(contract *parser.SolidityASTNode, warnings *WarningsColle
 			currentContractModifiers[modifierNode.Name] = modifierNode
 		}
 	}
-	currentContractFunctionNames = make(map[string]string)
-	for _, fn := range functions {
-		if fn.Name != "" {
-			currentContractFunctionNames[fn.Name] = toGoFunctionName(fn.Name, fn.Kind, fn.Visibility)
-		}
-	}
+	buildFunctionNameMaps(functions)
+	hasCallableABIMethod := false
 
 	for _, funcNode := range functions {
 		funcInfo, funcCode := transformFunction(&funcNode, warnings)
 		if funcInfo != nil {
 			result.Functions = append(result.Functions, *funcInfo)
+			if isManifestCallableFunctionName(funcInfo.Name) {
+				hasCallableABIMethod = true
+			}
 			sb.WriteString(funcCode)
 			sb.WriteString("\n")
 		}
+	}
+
+	if !hasCallableABIMethod {
+		warnings.AddWarning("No callable ABI methods detected; injecting _deploy stub for NeoGo manifest compatibility")
+		sb.WriteString("func _deploy(data any, isUpdate bool) {\n")
+		sb.WriteString("\t_ = data\n")
+		sb.WriteString("\t_ = isUpdate\n")
+		sb.WriteString("}\n\n")
+		result.Functions = append(result.Functions, FunctionInfo{
+			Name: "_deploy",
+			Parameters: []ParameterInfo{
+				{Name: "data", Type: "any"},
+				{Name: "isUpdate", Type: "bool"},
+			},
+			ReturnType: "",
+		})
 	}
 
 	result.GoSource = sb.String()
@@ -285,21 +301,24 @@ func transformContract(contract *parser.SolidityASTNode, warnings *WarningsColle
 	needsABIPackedHelper := strings.Contains(result.GoSource, "__abiEncodePacked(")
 	needsBoolToUintHelper := strings.Contains(result.GoSource, "__boolToUint(")
 	needsAddressCodeHelper := strings.Contains(result.GoSource, "__addressCode(")
+	needsBlockHashHelper := strings.Contains(result.GoSource, "__blockHash(")
+	needsMsgDataHelper := strings.Contains(result.GoSource, "__msgData(") || strings.Contains(result.GoSource, "__msgSig(")
+	needsEcRecoverHelper := strings.Contains(result.GoSource, "__ecrecover(")
 	needsTryAnyHelper := strings.Contains(result.GoSource, "__toAnySlice(") || strings.Contains(result.GoSource, "__fromAnyInt(") || strings.Contains(result.GoSource, "__fromAnyBytes(") || strings.Contains(result.GoSource, "__fromAnyString(") || strings.Contains(result.GoSource, "__fromAnyBool(") || strings.Contains(result.GoSource, "__tryErrToString(") || strings.Contains(result.GoSource, "__tryErrToBytes(") || strings.Contains(result.GoSource, "__tryErrToInt(") || strings.Contains(result.GoSource, "__tryErrToBool(")
 
-	hasInterop := strings.Contains(result.GoSource, "interop.Hash160") || strings.Contains(result.GoSource, "interop.Hash256") || needsLowLevelCallHelper || needsAddressCodeHelper || needsSysContractCallHelper
+	hasInterop := strings.Contains(result.GoSource, "interop.Hash160") || strings.Contains(result.GoSource, "interop.Hash256") || needsLowLevelCallHelper || needsAddressCodeHelper || needsSysContractCallHelper || needsEcRecoverHelper
 	hasStorage := strings.Contains(result.GoSource, "storage.")
 	hasUtil := strings.Contains(result.GoSource, "util.Equals")
-	hasLedger := strings.Contains(result.GoSource, "ledger.")
+	hasLedger := strings.Contains(result.GoSource, "ledger.") || needsBlockHashHelper
 	hasConvert := strings.Contains(result.GoSource, "convert.") || needsKeccakHelper || needsFixedBytesHelper || needsABIPackedHelper || needsTryAnyHelper || needsSysContractCallHelper
 	hasGas := strings.Contains(result.GoSource, "gas.") || needsLowLevelCallHelper
 	needsPow := strings.Contains(result.GoSource, "pow(")
-	needsCrypto := strings.Contains(result.GoSource, "crypto.") || needsKeccakHelper
-	needsContract := strings.Contains(result.GoSource, "contract.") || needsSysContractCallHelper
+	needsCrypto := strings.Contains(result.GoSource, "crypto.") || needsKeccakHelper || needsEcRecoverHelper
+	needsContract := strings.Contains(result.GoSource, "contract.") || needsSysContractCallHelper || needsEcRecoverHelper
 	needsManagement := strings.Contains(result.GoSource, "management.") || needsAddressCodeHelper
 	needsStd := strings.Contains(result.GoSource, "std.") || needsSysContractCallHelper
 	needsIterator := strings.Contains(result.GoSource, "iterator.")
-	hasRuntime := strings.Contains(result.GoSource, "runtime.") || needsLowLevelCallHelper
+	hasRuntime := strings.Contains(result.GoSource, "runtime.") || needsLowLevelCallHelper || needsMsgDataHelper
 
 	var imports []string
 	if hasInterop {
@@ -404,6 +423,102 @@ func __addressCode(addr interop.Hash160) []byte {
 		importEnd := strings.Index(result.GoSource, ")\n\n")
 		if importEnd > 0 {
 			result.GoSource = result.GoSource[:importEnd+3] + addressCodeHelper + result.GoSource[importEnd+3:]
+		}
+	}
+
+	if needsBlockHashHelper {
+		blockHashHelper := `
+func __blockHash(index int) []byte {
+	block := ledger.GetBlock(index)
+	if block == nil || block.Hash == nil {
+		return []byte{}
+	}
+	return block.Hash
+}
+
+`
+		importEnd := strings.Index(result.GoSource, ")\n\n")
+		if importEnd > 0 {
+			result.GoSource = result.GoSource[:importEnd+3] + blockHashHelper + result.GoSource[importEnd+3:]
+		}
+	}
+
+	if needsMsgDataHelper {
+		msgDataHelper := `
+func __msgData() []byte {
+	tx := runtime.GetScriptContainer()
+	if tx == nil || tx.Script == nil {
+		return []byte{}
+	}
+	return tx.Script
+}
+
+func __msgSig() []byte {
+	data := __msgData()
+	if len(data) >= 4 {
+		return data[:4]
+	}
+	out := []byte{0, 0, 0, 0}
+	copy(out, data)
+	return out
+}
+
+`
+		importEnd := strings.Index(result.GoSource, ")\n\n")
+		if importEnd > 0 {
+			result.GoSource = result.GoSource[:importEnd+3] + msgDataHelper + result.GoSource[importEnd+3:]
+		}
+	}
+
+	if needsEcRecoverHelper {
+		ecRecoverHelper := `
+func __ecrecover(msgHash []byte, v int, r []byte, s []byte) (addr interop.Hash160) {
+	defer func() {
+		if recover() != nil {
+			addr = nil
+		}
+	}()
+
+	if len(msgHash) != 32 || len(r) == 0 || len(s) == 0 {
+		return nil
+	}
+
+	sig := make([]byte, 65)
+	if len(r) >= 32 {
+		copy(sig[:32], r[len(r)-32:])
+	} else {
+		copy(sig[32-len(r):32], r)
+	}
+	if len(s) >= 32 {
+		copy(sig[32:64], s[len(s)-32:])
+	} else {
+		copy(sig[64-len(s):64], s)
+	}
+
+	if v == 27 || v == 28 {
+		sig[64] = byte(v - 27)
+	} else if v >= 0 && v <= 255 {
+		sig[64] = byte(v)
+	} else {
+		return nil
+	}
+
+	pub := crypto.RecoverSecp256K1(msgHash, sig)
+	if len(pub) != interop.PublicKeyCompressedLen && len(pub) != interop.PublicKeyUncompressedLen {
+		return nil
+	}
+
+	account := contract.CreateStandardAccount(interop.PublicKey(pub))
+	if len(account) != interop.Hash160Len {
+		return nil
+	}
+	return interop.Hash160(account)
+}
+
+`
+		importEnd := strings.Index(result.GoSource, ")\n\n")
+		if importEnd > 0 {
+			result.GoSource = result.GoSource[:importEnd+3] + ecRecoverHelper + result.GoSource[importEnd+3:]
 		}
 	}
 
@@ -689,6 +804,109 @@ func toGoFunctionName(name, kind, visibility string) string {
 	return resolveFunctionNameCollision(candidate)
 }
 
+func buildFunctionNameMaps(functions []parser.SolidityASTNode) {
+	currentContractFunctionNames = make(map[string]string)
+	currentContractFunctionNamesByID = make(map[int]string)
+
+	overloadCounts := make(map[string]int)
+	for _, fn := range functions {
+		if fn.Name != "" {
+			overloadCounts[fn.Name]++
+		}
+	}
+
+	used := make(map[string]int)
+	for i := range functions {
+		fn := &functions[i]
+		if fn.Name == "" {
+			continue
+		}
+
+		mapped := toGoFunctionName(fn.Name, fn.Kind, fn.Visibility)
+		if overloadCounts[fn.Name] > 1 {
+			mapped = toGoOverloadedFunctionName(fn)
+		}
+		mapped = ensureUniqueFunctionName(mapped, used)
+
+		currentContractFunctionNamesByID[fn.Id] = mapped
+		if overloadCounts[fn.Name] == 1 {
+			currentContractFunctionNames[fn.Name] = mapped
+		}
+	}
+}
+
+func toGoOverloadedFunctionName(fn *parser.SolidityASTNode) string {
+	if fn == nil {
+		return ""
+	}
+
+	base := toGoFunctionName(fn.Name, fn.Kind, fn.Visibility)
+	return base + "__" + functionOverloadSuffix(fn)
+}
+
+func functionOverloadSuffix(fn *parser.SolidityASTNode) string {
+	if fn == nil || fn.Parameters == nil || len(fn.Parameters.Parameters) == 0 {
+		return "noargs"
+	}
+
+	parts := make([]string, 0, len(fn.Parameters.Parameters))
+	for _, p := range fn.Parameters.Parameters {
+		typeStr := extractDeclaredType(&p)
+		parts = append(parts, sanitizeOverloadTypeToken(typeStr))
+	}
+	if len(parts) == 0 {
+		return "noargs"
+	}
+	return strings.Join(parts, "_")
+}
+
+func sanitizeOverloadTypeToken(typeStr string) string {
+	s := strings.TrimSpace(strings.ToLower(typeStr))
+	if s == "" {
+		return "any"
+	}
+
+	s = strings.ReplaceAll(s, " ", "")
+	s = strings.ReplaceAll(s, "[]", "_arr")
+	s = strings.ReplaceAll(s, "=>", "_to_")
+
+	var b strings.Builder
+	lastUnderscore := false
+	for _, r := range s {
+		isAlphaNum := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if isAlphaNum {
+			b.WriteRune(r)
+			lastUnderscore = false
+			continue
+		}
+		if !lastUnderscore {
+			b.WriteByte('_')
+			lastUnderscore = true
+		}
+	}
+
+	out := strings.Trim(b.String(), "_")
+	if out == "" {
+		return "any"
+	}
+	return out
+}
+
+func ensureUniqueFunctionName(name string, used map[string]int) string {
+	if used == nil {
+		return name
+	}
+
+	count, ok := used[name]
+	if !ok {
+		used[name] = 1
+		return name
+	}
+
+	used[name] = count + 1
+	return fmt.Sprintf("%s_%d", name, count+1)
+}
+
 func resolveFunctionNameCollision(name string) string {
 	for _, structName := range currentContractStructs {
 		if structName == name {
@@ -696,6 +914,18 @@ func resolveFunctionNameCollision(name string) string {
 		}
 	}
 	return name
+}
+
+func isManifestCallableFunctionName(name string) bool {
+	if name == "" {
+		return false
+	}
+	switch name {
+	case "_deploy", "_initialize", "verify":
+		return true
+	}
+	b := name[0]
+	return b >= 'A' && b <= 'Z'
 }
 
 func toGoPackageName(name string) string {
@@ -937,7 +1167,15 @@ func transformFunction(funcNode *parser.SolidityASTNode, warnings *WarningsColle
 	if name == "" && (kind == "fallback" || kind == "receive") {
 		warnings.AddWarning("Fallback/receive function mapped to _call - may have limited functionality")
 	}
-	name = toGoFunctionName(name, kind, visibility)
+	if funcNode.Name != "" {
+		if mappedName, ok := currentContractFunctionNamesByID[funcNode.Id]; ok {
+			name = mappedName
+		} else {
+			name = toGoFunctionName(name, kind, visibility)
+		}
+	} else {
+		name = toGoFunctionName(name, kind, visibility)
+	}
 
 	var params []ParameterInfo
 	if funcNode.Parameters != nil {
@@ -1096,6 +1334,13 @@ func transformFunction(funcNode *parser.SolidityASTNode, warnings *WarningsColle
 		}
 	} else {
 		sb.WriteString("\t// Auto-generated stub\n")
+		if returnType != "" {
+			if strings.HasPrefix(returnType, "(") {
+				sb.WriteString("\treturn\n")
+			} else {
+				sb.WriteString(fmt.Sprintf("\treturn %s\n", zeroValueForType(returnType)))
+			}
+		}
 	}
 
 	sb.WriteString("}\n")
@@ -1427,6 +1672,10 @@ func transformVariableDeclaration(stmt *parser.SolidityASTNode, warnings *Warnin
 				}
 
 				target, value, data := extractLowLevelCallParts(stmt.InitialValue, warnings)
+				kind := getLowLevelCallKind(stmt.InitialValue)
+				if kind == "delegatecall" || kind == "staticcall" {
+					value = "0"
+				}
 				sb.WriteString(fmt.Sprintf("\t__llSuccess, __llRetData := __lowLevelCallWithData(%s, %s, %s)\n", target, value, data))
 				sb.WriteString(fmt.Sprintf("\t%s := __llSuccess\n", names[0]))
 
@@ -1447,7 +1696,10 @@ func transformVariableDeclaration(stmt *parser.SolidityASTNode, warnings *Warnin
 					sb.WriteString(fmt.Sprintf("\t%s := %s\n", name, defaultVal))
 				}
 
-				warnings.AddWarning("Low-level .call tuple declaration lowered to (bool, bytes) stub return data")
+				if kind == "" {
+					kind = "call"
+				}
+				warnings.AddWarning(fmt.Sprintf("Low-level .%s tuple declaration lowered to (bool, bytes) stub return data", kind))
 				return sb.String()
 			}
 
@@ -1570,6 +1822,22 @@ func transformIfStatement(stmt *parser.SolidityASTNode, warnings *WarningsCollec
 
 func transformReturnStatement(stmt *parser.SolidityASTNode, warnings *WarningsCollector) string {
 	if stmt.Expression != nil {
+		if currentFunctionMultiReturn && isLowLevelCallExpression(stmt.Expression) {
+			kind := getLowLevelCallKind(stmt.Expression)
+			target, value, data := extractLowLevelCallParts(stmt.Expression, warnings)
+			if kind == "delegatecall" || kind == "staticcall" {
+				value = "0"
+			}
+			switch kind {
+			case "delegatecall":
+				warnings.AddWarning("Low-level .delegatecall lowered to __lowLevelCallWithData helper (not delegate-context semantics)")
+			case "staticcall":
+				warnings.AddWarning("Low-level .staticcall lowered to __lowLevelCallWithData helper (read-only semantics not enforced)")
+			default:
+				warnings.AddWarning("Low-level .call lowered to __lowLevelCallWithData helper (stub semantics)")
+			}
+			return fmt.Sprintf("\t__llSuccess, __llRetData := __lowLevelCallWithData(%s, %s, %s)\n\treturn []interface{}{__llSuccess, __llRetData}\n", target, value, data)
+		}
 		ret := transformExpression(stmt.Expression, warnings)
 		// Check if this is a tuple expression (multiple return values)
 		if stmt.Expression.NodeType == "TupleExpression" && currentFunctionMultiReturn {
@@ -1843,19 +2111,25 @@ func transformFunctionCall(stmt *parser.SolidityASTNode, warnings *WarningsColle
 		return transferCall
 	}
 
-	if mappedName, ok := currentContractFunctionNames[funcName]; ok && !isBuiltinFunction(funcName) {
-		funcName = mappedName
+	if !isBuiltinFunction(funcName) {
+		if mappedName, ok := resolveMappedFunctionNameForCall(stmt, funcName); ok {
+			funcName = mappedName
+		}
 	}
 
 	if isLowLevelCallExpression(stmt) {
 		return transformLowLevelCall(stmt, warnings)
 	}
 
+	if contractCallExpr, ok := transformInterfaceContractCall(stmt, args, warnings); ok {
+		return contractCallExpr
+	}
+
 	if ns, member, ok := getStaticNamespaceCall(stmt); ok && isPotentialLibraryNamespace(ns) && !isSpecialNamespace(ns) {
 		if member == "toUint" && len(args) == 1 {
 			return fmt.Sprintf("__boolToUint(%s)", args[0])
 		}
-		if mappedName, ok := currentContractFunctionNames[member]; ok {
+		if mappedName, ok := resolveMappedFunctionNameForCall(stmt, member); ok {
 			return fmt.Sprintf("%s(%s)", mappedName, strings.Join(args, ", "))
 		}
 		return fmt.Sprintf("%s(%s)", member, strings.Join(args, ", "))
@@ -2088,10 +2362,20 @@ func transformFunctionCall(stmt *parser.SolidityASTNode, warnings *WarningsColle
 		return fmt.Sprintf("crypto.Sha256(%s)", strings.Join(args, ", "))
 	case "ripemd160":
 		return fmt.Sprintf("crypto.Ripemd160(%s)", strings.Join(args, ", "))
+	case "blockhash":
+		if len(args) == 0 {
+			return "__blockHash(0)"
+		}
+		warnings.AddWarning("blockhash lowered to ledger.GetBlock(index).Hash (Neo block hash semantics)")
+		return fmt.Sprintf("__blockHash(%s)", args[0])
 	case "ecrecover":
-		return fmt.Sprintf("crypto.Ecrecover(%s)", strings.Join(args, ", "))
+		warnings.AddWarning("ecrecover lowered to RecoverSecp256K1 + CreateStandardAccount (Neo address semantics)")
+		return fmt.Sprintf("__ecrecover(%s)", strings.Join(args, ", "))
 	case "gasleft":
 		return "runtime.GasLeft()"
+	case "selfdestruct":
+		warnings.AddWarning("selfdestruct lowered to management.Destroy() (beneficiary argument ignored)")
+		return "management.Destroy()"
 	case "address", "address payable", "payable":
 		if len(args) == 1 {
 			if len(argNodes) > 0 && isZeroNumericLiteral(&argNodes[0]) {
@@ -2153,6 +2437,106 @@ func getStaticNamespaceCall(stmt *parser.SolidityASTNode) (string, string, bool)
 	return namespace, member, true
 }
 
+func transformInterfaceContractCall(stmt *parser.SolidityASTNode, args []string, warnings *WarningsCollector) (string, bool) {
+	if stmt == nil || stmt.Expression == nil || stmt.Expression.NodeType != "MemberAccess" {
+		return "", false
+	}
+
+	expr := stmt.Expression
+	methodName := expr.MemberName
+	if methodName == "" {
+		return "", false
+	}
+	switch methodName {
+	case "call", "delegatecall", "staticcall", "send", "transfer", "push", "pop":
+		return "", false
+	}
+	if expr.Expression != nil && expr.Expression.NodeType == "Identifier" && expr.Expression.Name == "this" {
+		return "", false
+	}
+
+	targetExpr, ok := extractInterfaceCallTarget(expr.Expression, warnings)
+	if !ok || targetExpr == "" {
+		return "", false
+	}
+
+	callExpr := ""
+	if len(args) == 0 {
+		callExpr = fmt.Sprintf("contract.Call(%s, %q, contract.All)", targetExpr, methodName)
+	} else {
+		callExpr = fmt.Sprintf("contract.Call(%s, %q, contract.All, %s)", targetExpr, methodName, strings.Join(args, ", "))
+	}
+
+	// Preserve bytes-like expectations (e.g. bytes4 selectors) when present in AST.
+	if isBytesType(getExpressionType(stmt)) {
+		return fmt.Sprintf("convert.ToBytes(%s)", callExpr), true
+	}
+	return callExpr, true
+}
+
+func extractInterfaceCallTarget(expr *parser.SolidityASTNode, warnings *WarningsCollector) (string, bool) {
+	if expr == nil {
+		return "", false
+	}
+
+	if expr.NodeType == "FunctionCall" && expr.Expression != nil && len(expr.Arguments) == 1 {
+		// Handle InterfaceName(addr).method(...).
+		if expr.Expression.NodeType == "Identifier" {
+			callee := expr.Expression.Name
+			if callee != "" && isPotentialLibraryNamespace(callee) && !isBuiltinFunction(callee) {
+				return transformExpression(&expr.Arguments[0], warnings), true
+			}
+		}
+	}
+
+	typeStr := getExpressionType(expr)
+	if strings.Contains(typeStr, "[]") || strings.Contains(typeStr, "mapping") {
+		return "", false
+	}
+	if isAddressLikeExpression(expr) || isAddressType(typeStr) {
+		return transformExpression(expr, warnings), true
+	}
+
+	return "", false
+}
+
+func resolveMappedFunctionNameByReference(node *parser.SolidityASTNode) (string, bool) {
+	if node == nil {
+		return "", false
+	}
+	if node.ReferencedDeclaration == 0 {
+		return "", false
+	}
+	mapped, ok := currentContractFunctionNamesByID[node.ReferencedDeclaration]
+	return mapped, ok
+}
+
+func resolveMappedFunctionNameForCall(stmt *parser.SolidityASTNode, fallbackName string) (string, bool) {
+	if stmt == nil {
+		return "", false
+	}
+
+	expr := stmt.Expression
+	if expr != nil && expr.NodeType == "FunctionCallOptions" && expr.Expression != nil {
+		expr = expr.Expression
+	}
+
+	if mappedName, ok := resolveMappedFunctionNameByReference(expr); ok {
+		return mappedName, true
+	}
+	if mappedName, ok := resolveMappedFunctionNameByReference(stmt); ok {
+		return mappedName, true
+	}
+
+	if fallbackName != "" {
+		if mappedName, ok := currentContractFunctionNames[fallbackName]; ok {
+			return mappedName, true
+		}
+	}
+
+	return "", false
+}
+
 func isPotentialLibraryNamespace(name string) bool {
 	if name == "" {
 		return false
@@ -2208,7 +2592,7 @@ func tryTransformAddressTransferCall(stmt *parser.SolidityASTNode, warnings *War
 
 func isBuiltinFunction(name string) bool {
 	builtins := []string{"require", "assert", "revert", "keccak256", "sha256", "ripemd160", "ecrecover", "gasleft",
-		"addmod", "mulmod", "abi", "blockhash", "address", "uint", "uint256", "int", "int256",
+		"selfdestruct", "addmod", "mulmod", "abi", "blockhash", "address", "uint", "uint256", "int", "int256",
 		"bytes", "string", "bool"}
 	for _, b := range builtins {
 		if strings.EqualFold(name, b) {
@@ -2219,24 +2603,47 @@ func isBuiltinFunction(name string) bool {
 }
 
 func isLowLevelCallExpression(node *parser.SolidityASTNode) bool {
+	return getLowLevelCallKind(node) != ""
+}
+
+func getLowLevelCallKind(node *parser.SolidityASTNode) string {
 	if node == nil || node.NodeType != "FunctionCall" || node.Expression == nil {
-		return false
+		return ""
 	}
 
-	if node.Expression.NodeType == "MemberAccess" && node.Expression.MemberName == "call" {
-		return true
+	if node.Expression.NodeType == "MemberAccess" {
+		member := node.Expression.MemberName
+		if member == "call" || member == "delegatecall" || member == "staticcall" {
+			return member
+		}
 	}
 
 	if node.Expression.NodeType == "FunctionCallOptions" && node.Expression.Expression != nil {
-		return node.Expression.Expression.NodeType == "MemberAccess" && node.Expression.Expression.MemberName == "call"
+		if node.Expression.Expression.NodeType == "MemberAccess" {
+			member := node.Expression.Expression.MemberName
+			if member == "call" || member == "delegatecall" || member == "staticcall" {
+				return member
+			}
+		}
 	}
 
-	return false
+	return ""
 }
 
 func transformLowLevelCall(node *parser.SolidityASTNode, warnings *WarningsCollector) string {
+	kind := getLowLevelCallKind(node)
 	target, value, data := extractLowLevelCallParts(node, warnings)
-	warnings.AddWarning("Low-level .call lowered to __lowLevelCall helper (stub semantics)")
+	if kind == "delegatecall" || kind == "staticcall" {
+		value = "0"
+	}
+	switch kind {
+	case "delegatecall":
+		warnings.AddWarning("Low-level .delegatecall lowered to __lowLevelCall helper (not delegate-context semantics)")
+	case "staticcall":
+		warnings.AddWarning("Low-level .staticcall lowered to __lowLevelCall helper (read-only semantics not enforced)")
+	default:
+		warnings.AddWarning("Low-level .call lowered to __lowLevelCall helper (stub semantics)")
+	}
 	return fmt.Sprintf("__lowLevelCall(%s, %s, %s)", target, value, data)
 }
 
@@ -2296,6 +2703,59 @@ func extractLowLevelCallParts(node *parser.SolidityASTNode, warnings *WarningsCo
 
 func transformUnaryOperation(stmt *parser.SolidityASTNode, warnings *WarningsCollector) string {
 	operator := stmt.Operator
+
+	if operator == "delete" {
+		operandNode := getUnaryOperandNode(stmt)
+		if operandNode == nil {
+			return ""
+		}
+
+		if operandNode.NodeType == "IndexAccess" {
+			if operandNode.BaseExpression != nil && shouldUseDirectArrayIndex(operandNode.BaseExpression) && !isMappingBackedIndexAccess(operandNode) {
+				baseExpr := transformExpression(operandNode.BaseExpression, warnings)
+				indexExpr := "0"
+				if operandNode.IndexExpression != nil {
+					indexExpr = transformExpression(operandNode.IndexExpression, warnings)
+				} else if len(operandNode.Children) > 1 {
+					indexExpr = transformExpression(&operandNode.Children[1], warnings)
+				}
+				elemType := mapTypeFromASTType(getExpressionType(operandNode))
+				if elemType == "" {
+					elemType = "int"
+				}
+				zero := zeroValueForType(elemType)
+				return fmt.Sprintf("%s[%s] = %s", baseExpr, indexExpr, zero)
+			}
+
+			storageKey := buildStorageKey(operandNode, warnings)
+			return fmt.Sprintf("storage.Delete(ctx, %s)", storageKey)
+		}
+
+		if operandNode.NodeType == "Identifier" {
+			name := transformExpression(operandNode, warnings)
+			goType := mapTypeFromASTType(getExpressionType(operandNode))
+			if goType == "" {
+				if declared, ok := currentContractVariableTypes[name]; ok {
+					goType = declared
+				}
+			}
+			if goType == "" {
+				goType = "int"
+			}
+			return fmt.Sprintf("%s = %s", name, zeroValueForType(goType))
+		}
+
+		if operandNode.NodeType == "MemberAccess" {
+			memberExpr := transformExpression(operandNode, warnings)
+			goType := mapTypeFromASTType(getExpressionType(operandNode))
+			if goType == "" {
+				goType = "int"
+			}
+			return fmt.Sprintf("%s = %s", memberExpr, zeroValueForType(goType))
+		}
+
+		return ""
+	}
 
 	if operator == "++" || operator == "--" {
 		operandNode := getUnaryOperandNode(stmt)
@@ -2612,6 +3072,9 @@ func transformMemberAccess(stmt *parser.SolidityASTNode, warnings *WarningsColle
 		}
 
 		if stmt.Expression.NodeType == "Identifier" && stmt.Expression.Name == "this" {
+			if mappedName, ok := resolveMappedFunctionNameByReference(stmt); ok {
+				return mappedName
+			}
 			if mappedName, ok := currentContractFunctionNames[member]; ok {
 				return mappedName
 			}
@@ -2626,6 +3089,14 @@ func transformMemberAccess(stmt *parser.SolidityASTNode, warnings *WarningsColle
 		if isMsgIdentifier && member == "value" {
 			return "0"
 		}
+		if isMsgIdentifier && member == "data" {
+			warnings.AddWarning("msg.data approximated from Runtime.GetScriptContainer().Script")
+			return "__msgData()"
+		}
+		if isMsgIdentifier && member == "sig" {
+			warnings.AddWarning("msg.sig approximated as first 4 bytes of Runtime.GetScriptContainer().Script")
+			return "__msgSig()"
+		}
 
 		if isBlockIdentifier {
 			switch member {
@@ -2633,6 +3104,8 @@ func transformMemberAccess(stmt *parser.SolidityASTNode, warnings *WarningsColle
 				return "runtime.GetTime()"
 			case "number":
 				return "ledger.CurrentIndex()"
+			case "chainid":
+				return "runtime.GetNetwork()"
 			case "coinbase":
 				return "ledger.GetBlock(ledger.CurrentIndex()).NextConsensus"
 			case "difficulty", "gaslimit", "prevrandao":
@@ -2645,6 +3118,26 @@ func transformMemberAccess(stmt *parser.SolidityASTNode, warnings *WarningsColle
 		}
 		if stmt.Expression.NodeType == "Identifier" && stmt.Expression.Name == "NativeCalls" && member == "GAS_CONTRACT" {
 			return "nil"
+		}
+
+		if member == "selector" {
+			methodName := ""
+			if stmt.Expression != nil {
+				switch stmt.Expression.NodeType {
+				case "MemberAccess":
+					methodName = stmt.Expression.MemberName
+				case "Identifier":
+					methodName = stmt.Expression.Name
+				}
+			}
+			if methodName == "" {
+				return "[]byte{}"
+			}
+			if selector, ok := knownMethodSelectorBytes(methodName); ok {
+				return selector
+			}
+			warnings.AddWarning(fmt.Sprintf("Function selector '%s' lowered to method-name bytes (approximate)", methodName))
+			return fmt.Sprintf("[]byte(%q)", methodName)
 		}
 
 		// Handle push on arrays (both simple identifiers and index accesses like mapping[...].push)
@@ -2845,6 +3338,16 @@ func typeLimitExpr(typeName string, member string) (string, bool) {
 			return "0", true
 		}
 		return "(-int(^uint(0)>>1) - 1)", true
+	default:
+		return "", false
+	}
+}
+
+func knownMethodSelectorBytes(methodName string) (string, bool) {
+	switch methodName {
+	case "onERC721Received":
+		// bytes4(keccak256("onERC721Received(address,address,uint256,bytes)"))
+		return "[]byte{0x15, 0x0b, 0x7a, 0x02}", true
 	default:
 		return "", false
 	}
@@ -3060,7 +3563,7 @@ func transformExpression(expr *parser.SolidityASTNode, warnings *WarningsCollect
 	case "Literal":
 		return transformLiteral(expr, warnings)
 	case "Assignment":
-		return transformAssignment(expr, warnings)
+		return transformAssignmentExpression(expr, warnings)
 	case "Return":
 		if expr.Expression != nil {
 			return transformExpression(expr.Expression, warnings)
@@ -3078,6 +3581,35 @@ func transformExpression(expr *parser.SolidityASTNode, warnings *WarningsCollect
 	default:
 		return fmt.Sprintf("/* %s */", expr.NodeType)
 	}
+}
+
+func transformAssignmentExpression(expr *parser.SolidityASTNode, warnings *WarningsCollector) string {
+	if expr == nil || expr.LeftHandSide == nil || expr.RightHandSide == nil {
+		return "0"
+	}
+
+	// Statement form is still used for assignment statements.
+	assignStmt := transformAssignment(expr, warnings)
+	assignStmt = strings.Trim(assignStmt, "\n")
+	if strings.HasPrefix(assignStmt, "\t") {
+		assignStmt = strings.TrimPrefix(assignStmt, "\t")
+	}
+	assignStmt = strings.ReplaceAll(assignStmt, "\n\t", "\n")
+
+	lhsExpr := transformExpression(expr.LeftHandSide, warnings)
+	if lhsExpr == "" {
+		lhsExpr = "0"
+	}
+
+	goType := mapTypeFromASTType(getExpressionType(expr.LeftHandSide))
+	if goType == "" {
+		goType = mapTypeFromASTType(getExpressionType(expr))
+	}
+	if goType == "" {
+		goType = "int"
+	}
+
+	return fmt.Sprintf("func() %s {\n\t%s\n\treturn %s\n}()", goType, assignStmt, lhsExpr)
 }
 
 func transformAssignment(expr *parser.SolidityASTNode, warnings *WarningsCollector) string {
@@ -3223,7 +3755,11 @@ func transformAssignment(expr *parser.SolidityASTNode, warnings *WarningsCollect
 }
 
 func transformLowLevelCallTupleAssignment(leftTuple *parser.SolidityASTNode, callNode *parser.SolidityASTNode, warnings *WarningsCollector) string {
+	kind := getLowLevelCallKind(callNode)
 	target, value, data := extractLowLevelCallParts(callNode, warnings)
+	if kind == "delegatecall" || kind == "staticcall" {
+		value = "0"
+	}
 	components := []parser.SolidityASTNode{}
 	if len(leftTuple.Components) > 0 {
 		components = leftTuple.Components
@@ -3269,7 +3805,10 @@ func transformLowLevelCallTupleAssignment(leftTuple *parser.SolidityASTNode, cal
 		sb.WriteString("\t_ = __llRetData\n")
 	}
 
-	warnings.AddWarning("Low-level .call tuple assignment lowered to (bool, bytes) stub return data")
+	if kind == "" {
+		kind = "call"
+	}
+	warnings.AddWarning(fmt.Sprintf("Low-level .%s tuple assignment lowered to (bool, bytes) stub return data", kind))
 	return strings.TrimSuffix(sb.String(), "\n")
 }
 
@@ -3460,10 +3999,24 @@ func transformConditional(expr *parser.SolidityASTNode, warnings *WarningsCollec
 		falseExpr = transformExpression(expr.FalseExpression, warnings)
 	}
 
-	if cond != "" && trueExpr != "" && falseExpr != "" {
-		return fmt.Sprintf("func() int { if %s { return %s }; return %s }()", cond, trueExpr, falseExpr)
+	retType := ""
+	if expr.TypeDescriptions != nil && expr.TypeDescriptions.TypeString != "" {
+		retType = mapTypeFromASTType(expr.TypeDescriptions.TypeString)
 	}
-	return "0"
+	if retType == "" && expr.TrueExpression != nil {
+		retType = mapTypeFromASTType(getExpressionType(expr.TrueExpression))
+	}
+	if retType == "" && expr.FalseExpression != nil {
+		retType = mapTypeFromASTType(getExpressionType(expr.FalseExpression))
+	}
+	if retType == "" {
+		retType = "int"
+	}
+
+	if cond != "" && trueExpr != "" && falseExpr != "" {
+		return fmt.Sprintf("func() %s { if %s { return %s }; return %s }()", retType, cond, trueExpr, falseExpr)
+	}
+	return zeroValueForType(retType)
 }
 
 func transformTupleExpression(expr *parser.SolidityASTNode, warnings *WarningsCollector) string {
@@ -3863,13 +4416,7 @@ func transformForStatement(stmt *parser.SolidityASTNode, warnings *WarningsColle
 
 	// Check for loop expression (increment)
 	if stmt.LoopExpression != nil {
-		loopExpr := stmt.LoopExpression
-		// Handle ExpressionStatement wrapper
-		if loopExpr.NodeType == "ExpressionStatement" && loopExpr.Expression != nil {
-			increment = transformExpression(loopExpr.Expression, warnings)
-		} else {
-			increment = transformExpression(loopExpr, warnings)
-		}
+		increment = transformForLoopIncrement(stmt.LoopExpression, warnings)
 		// Remove leading/trailing whitespace/newlines
 		increment = strings.Trim(increment, "\t\n ")
 	}
@@ -3911,4 +4458,42 @@ func transformForLoopInit(stmt *parser.SolidityASTNode, warnings *WarningsCollec
 		return fmt.Sprintf("var %s %s", varName, varType)
 	}
 	return ""
+}
+
+func transformForLoopIncrement(loopExpr *parser.SolidityASTNode, warnings *WarningsCollector) string {
+	if loopExpr == nil {
+		return ""
+	}
+
+	node := loopExpr
+	if node.NodeType == "ExpressionStatement" && node.Expression != nil {
+		node = node.Expression
+	}
+
+	if node.NodeType == "UnaryOperation" && (node.Operator == "++" || node.Operator == "--") {
+		operand := getUnaryOperandNode(node)
+		if operand != nil && operand.NodeType == "Identifier" {
+			return operand.Name + node.Operator
+		}
+		if operand != nil {
+			operandExpr := transformExpression(operand, warnings)
+			if operandExpr != "" {
+				if node.Operator == "++" {
+					return fmt.Sprintf("%s = %s + 1", operandExpr, operandExpr)
+				}
+				return fmt.Sprintf("%s = %s - 1", operandExpr, operandExpr)
+			}
+		}
+	}
+
+	if node.NodeType == "Assignment" {
+		assign := transformAssignment(node, warnings)
+		assign = strings.Trim(assign, "\t\n")
+		assign = strings.ReplaceAll(assign, "\n\t", "\n")
+		return assign
+	}
+
+	increment := transformExpression(node, warnings)
+	increment = strings.TrimSpace(increment)
+	return strings.ReplaceAll(increment, "\n", " ")
 }
