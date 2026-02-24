@@ -89,7 +89,7 @@ module mycontract
 
 go 1.24
 
-require github.com/nspcc-dev/neo-go/pkg/interop v0.0.0-20260121113504-979d1f4aada1
+require github.com/nspcc-dev/neo-go v0.117.0
 EOF
 
 # 3. Create manifest config
@@ -111,6 +111,25 @@ neo-go contract compile \
   --no-events \
   --no-permissions
 ```
+
+## Validation Suite
+
+The Solidity validation corpus and runner are versioned in `testcontracts/`.
+
+```bash
+# from repo root
+./testcontracts/run_full_suite.sh
+```
+
+By default, the runner bootstraps a pinned `neo-go` source checkout under `testcontracts/.deps/` for deterministic results.
+
+Environment overrides:
+
+- `SOL2NEO_BIN`: path to transpiler binary (default: `./bin/sol2neo`)
+- `NEOGO_BIN`: NeoGo command name (default: `neo-go`)
+- `INTEROP_VERSION`: `github.com/nspcc-dev/neo-go/pkg/interop` module version (default: `v0.0.0-20260121113504-979d1f4aada1`)
+- `NEOGO_REPO`: optional local checkout path for `replace github.com/nspcc-dev/neo-go => ...`
+- `NEOGO_REPO_REF`: git ref used when auto-bootstrap is active (default: `979d1f4aada1`)
 
 ## Features
 
@@ -193,6 +212,7 @@ func getValue() int {
 
 ```
 sol2neo/
+├── testcontracts/             # Solidity validation corpus + suite runner
 ├── cmd/sol2neo/main.go      # CLI entry point
 ├── parser/solidity_parser.go # Solidity AST parsing
 ├── transformer/

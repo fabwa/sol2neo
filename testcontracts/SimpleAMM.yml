@@ -1,0 +1,34 @@
+name: "SimpleAMM"
+sourceurl: https://github.com/example/simpleamm/
+supportedstandards: []
+events:
+  - name: LiquidityAdded
+    parameters:
+      - name: provider
+        type: Hash160
+      - name: amountA
+        type: Integer
+      - name: amountB
+        type: Integer
+      - name: sharesMinted
+        type: Integer
+  - name: LiquidityRemoved
+    parameters:
+      - name: provider
+        type: Hash160
+      - name: amountA
+        type: Integer
+      - name: amountB
+        type: Integer
+      - name: sharesBurned
+        type: Integer
+  - name: Swap
+    parameters:
+      - name: trader
+        type: Hash160
+      - name: tokenIn
+        type: Hash160
+      - name: amountIn
+        type: Integer
+      - name: amountOut
+        type: Integer

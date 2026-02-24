@@ -1,0 +1,14 @@
+.DS_Store
+
+# Suite outputs
+.suite_build/
+full_suite.results.tsv
+.deps/
+
+# Legacy local artifacts
+.phase2_check/
+.validation_build*/
+complex_examples/build/
+external_semantic/build/
+external_semantic/solidity_semantictests/build/
+tmp_build/
