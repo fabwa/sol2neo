@@ -218,7 +218,7 @@ sol2neo/
 ├── transformer/
 │   ├── transformer.go       # Main transformation logic
 │   └── type_mapper.go       # Type mapping
-├── compiler/compile.go      # (Future) Direct compilation
+├── compiler/compile.go      # NeoGo CLI compilation helpers
 ├── go.mod
 └── README.md
 ```

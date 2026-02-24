@@ -1333,7 +1333,6 @@ func transformFunction(funcNode *parser.SolidityASTNode, warnings *WarningsColle
 			}
 		}
 	} else {
-		sb.WriteString("\t// Auto-generated stub\n")
 		if returnType != "" {
 			if strings.HasPrefix(returnType, "(") {
 				sb.WriteString("\treturn\n")
@@ -2150,21 +2149,34 @@ func transformFunctionCall(stmt *parser.SolidityASTNode, warnings *WarningsColle
 		// Extract the storage key expression - this is for arrays in mappings
 		// e.g., userTickets[roundId][msg.sender].push(ticketNumber)
 		storageKeyExpr := funcName[len("__append__"):]
-		if len(args) > 0 {
-			elemType := "int"
-			if len(argNodes) > 0 {
-				if inferred := mapTypeFromASTType(getExpressionType(&argNodes[0])); inferred != "" {
-					elemType = inferred
+		elemType := "int"
+		if len(argNodes) > 0 {
+			if inferred := mapTypeFromASTType(getExpressionType(&argNodes[0])); inferred != "" {
+				elemType = inferred
+			}
+		} else if stmt.Expression != nil && stmt.Expression.NodeType == "MemberAccess" && stmt.Expression.Expression != nil {
+			arrayType := mapTypeFromASTType(getExpressionType(stmt.Expression.Expression))
+			if strings.HasPrefix(arrayType, "[]") {
+				inferredElem := strings.TrimPrefix(arrayType, "[]")
+				if inferredElem != "" {
+					elemType = inferredElem
 				}
 			}
-			// For storage-backed arrays in mappings, we need:
-			// 1. Get current array (or empty if nil)
-			// 2. Append element
-			// 3. Put back
-			// Generate inline code for this
-			return fmt.Sprintf("_arr := storage.Get(ctx, %s); if _arr == nil { _arr = []%s{} }; storage.Put(ctx, %s, append(_arr.([]%s), %s))", storageKeyExpr, elemType, storageKeyExpr, elemType, args[0])
 		}
-		return fmt.Sprintf("/* TODO: append to array at %s */", storageKeyExpr)
+
+		elemExpr := zeroValueForType(elemType)
+		if isStructType(elemType) {
+			elemExpr = fmt.Sprintf("%s{}", elemType)
+		}
+		if len(args) > 0 {
+			elemExpr = args[0]
+		}
+
+		// For storage-backed arrays in mappings, we need:
+		// 1. Get current array (or empty if nil)
+		// 2. Append element
+		// 3. Put back
+		return fmt.Sprintf("_arr := storage.Get(ctx, %s); if _arr == nil { _arr = []%s{} }; storage.Put(ctx, %s, append(_arr.([]%s), %s))", storageKeyExpr, elemType, storageKeyExpr, elemType, elemExpr)
 	}
 
 	switch funcName {
