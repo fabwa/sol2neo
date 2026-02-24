@@ -130,6 +130,7 @@ Environment overrides:
 - `INTEROP_VERSION`: `github.com/nspcc-dev/neo-go/pkg/interop` module version (default: `v0.0.0-20260121113504-979d1f4aada1`)
 - `NEOGO_REPO`: optional local checkout path for `replace github.com/nspcc-dev/neo-go => ...`
 - `NEOGO_REPO_REF`: git ref used when auto-bootstrap is active (default: `979d1f4aada1`)
+- `NEOGO_COMPILE_MAX_ATTEMPTS`: retry count for transient NeoGo `invalid label target: -1` compile failures (default: `12`)
 
 ## Features
 

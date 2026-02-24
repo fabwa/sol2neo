@@ -10,6 +10,8 @@ INTEROP_VERSION="${INTEROP_VERSION:-v0.0.0-20260121113504-979d1f4aada1}"
 NEOGO_REPO_REF="${NEOGO_REPO_REF:-979d1f4aada1}"
 DEFAULT_NEOGO_REPO="${ROOT_DIR}/.deps/neo-go-master"
 NEOGO_REPO="${NEOGO_REPO:-${DEFAULT_NEOGO_REPO}}"
+NEOGO_COMPILE_MAX_ATTEMPTS="${NEOGO_COMPILE_MAX_ATTEMPTS:-12}"
+NEOGO_TRANSIENT_COMPILE_ERROR="invalid label target: -1"
 
 BUILD_ROOT="${ROOT_DIR}/.suite_build"
 BASELINE_BUILD_DIR="${BUILD_ROOT}/baseline"
@@ -82,6 +84,39 @@ permissions: []
 EOF
 }
 
+run_neogo_compile() {
+  local out_dir="$1"
+  local contract_name="$2"
+  local attempt
+  local attempt_log
+  local final_log="${out_dir}/neocompile.log"
+
+  for ((attempt = 1; attempt <= NEOGO_COMPILE_MAX_ATTEMPTS; attempt++)); do
+    attempt_log="${out_dir}/neocompile.attempt${attempt}.log"
+    if (cd "${out_dir}" && "${NEOGO_BIN}" contract compile \
+      -i "${contract_name}.go" \
+      -o "${contract_name}.nef" \
+      -m "${contract_name}.manifest.json" \
+      -c "${contract_name}.yml" \
+      --no-events \
+      --no-permissions > "${attempt_log}" 2>&1); then
+      cp "${attempt_log}" "${final_log}"
+      if (( attempt > 1 )); then
+        echo "note: neo-go compile succeeded on attempt ${attempt}/${NEOGO_COMPILE_MAX_ATTEMPTS}" >> "${final_log}"
+      fi
+      return 0
+    fi
+
+    if ! grep -Fq "${NEOGO_TRANSIENT_COMPILE_ERROR}" "${attempt_log}"; then
+      cp "${attempt_log}" "${final_log}"
+      return 1
+    fi
+  done
+
+  cp "${attempt_log}" "${final_log}"
+  return 1
+}
+
 run_suite() {
   local suite_name="$1"
   local source_dir="$2"
@@ -125,13 +160,7 @@ run_suite() {
       fi
 
       if [[ "${gobuild_status}" == "PASS" ]]; then
-        if (cd "${out_dir}" && "${NEOGO_BIN}" contract compile \
-          -i "${contract_name}.go" \
-          -o "${contract_name}.nef" \
-          -m "${contract_name}.manifest.json" \
-          -c "${contract_name}.yml" \
-          --no-events \
-          --no-permissions > neocompile.log 2>&1); then
+        if run_neogo_compile "${out_dir}" "${contract_name}"; then
           neogo_status="PASS"
         else
           neogo_status="FAIL"

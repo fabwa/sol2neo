@@ -12,6 +12,8 @@ const (
 	defaultModuleName    = "sol2neo-contract"
 	defaultInteropModule = "github.com/nspcc-dev/neo-go/pkg/interop"
 	defaultInteropVer    = "v0.0.0-20260121113504-979d1f4aada1"
+	defaultCompileTries  = 12
+	transientCompileErr  = "invalid label target: -1"
 )
 
 type compilePaths struct {
@@ -50,7 +52,7 @@ func CompileGo(filename, packageName string) ([]byte, error) {
 		"--no-events",
 		"--no-permissions",
 	}
-	if err := runCommand(paths.workDir, neoGoPath, args...); err != nil {
+	if err := runNeoGoCompile(paths.workDir, neoGoPath, args...); err != nil {
 		return nil, err
 	}
 
@@ -109,7 +111,7 @@ func CompileWithManifest(filename, packageName string, config *ContractConfig) (
 		args = append(args, "--no-permissions")
 	}
 
-	if err := runCommand(paths.workDir, neoGoPath, args...); err != nil {
+	if err := runNeoGoCompile(paths.workDir, neoGoPath, args...); err != nil {
 		return nil, nil, err
 	}
 
@@ -238,6 +240,35 @@ func runCommand(dir, binary string, args ...string) error {
 		return fmt.Errorf("%s %s failed: %w\n%s", binary, strings.Join(args, " "), err, msg)
 	}
 	return nil
+}
+
+func runNeoGoCompile(dir, binary string, args ...string) error {
+	var lastErr error
+	var lastMsg string
+
+	for attempt := 1; attempt <= defaultCompileTries; attempt++ {
+		cmd := exec.Command(binary, args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			return nil
+		}
+
+		lastErr = err
+		lastMsg = strings.TrimSpace(string(out))
+		isTransient := strings.Contains(lastMsg, transientCompileErr)
+		if !isTransient || attempt == defaultCompileTries {
+			if lastMsg == "" {
+				return fmt.Errorf("%s %s failed after %d attempt(s): %w", binary, strings.Join(args, " "), attempt, err)
+			}
+			return fmt.Errorf("%s %s failed after %d attempt(s): %w\n%s", binary, strings.Join(args, " "), attempt, err, lastMsg)
+		}
+	}
+
+	if lastMsg == "" {
+		return fmt.Errorf("%s %s failed: %w", binary, strings.Join(args, " "), lastErr)
+	}
+	return fmt.Errorf("%s %s failed: %w\n%s", binary, strings.Join(args, " "), lastErr, lastMsg)
 }
 
 func normalizeModuleName(packageName string) string {
