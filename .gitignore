@@ -1,0 +1,40 @@
+# Binaries
+sol2neo
+bin/sol2neo
+
+# Build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Dependency directories
+vendor/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Debug files
+*.debug.json
+
+# Generated Go files from Solidity (optional - uncomment if you don't want to track generated files)
+# *.go
